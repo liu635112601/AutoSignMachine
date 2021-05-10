@@ -10,5 +10,5 @@ app.use('/', express.static(path.join(__dirname, './dist')));
 app.set('port', process.env.PORT || 3003);
 
 bindRoute(app, express).listen(app.get('port'), async function () {
-  console.log('JdWebUI listening on port ' + app.get('port'));
+  console.log('JdWebUI listening on http://localhost:' + app.get('port'));
 });
