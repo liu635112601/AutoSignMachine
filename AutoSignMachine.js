@@ -5,7 +5,7 @@ const fs = require('fs-extra')
 const log = require('./utils/log')
 const dotenv = require("dotenv")
 
-function registerEvn(argvs) {
+function registerEvn (argvs) {
 
   // 注入全局环境变量，可用于通知参数等
   let env_file = argvs.env_file ? argvs.env_file : path.join(__dirname, '.env')
@@ -100,6 +100,14 @@ var AutoSignMachine_Run = (argv) => {
   registerEvn(argvs)
 
 }
+
+var AutoSignMachine_WebUI = (argv) => {
+  argv = (argv || process.argv).slice(2)
+  registerEvn(argv)
+  require('./webUI/webUI')
+}
+
 module.exports = {
-  run: AutoSignMachine_Run
+  run: AutoSignMachine_Run,
+  webUI: AutoSignMachine_WebUI
 }

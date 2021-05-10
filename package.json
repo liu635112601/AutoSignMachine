@@ -7,13 +7,17 @@
   "author": "lunnlew",
   "license": "MIT",
   "dependencies": {
+    "aes-js": "^3.1.2",
     "axios": ">=0.21.1",
     "axios-cookiejar-support": "^1.0.1",
+    "body-parser": "^1.19.0",
     "cheerio": "^1.0.0-rc.3",
+    "cryptico": "^1.0.2",
     "crypto": "^1.0.1",
     "crypto-js": "^4.0.0",
     "dayjs": "^1.9.6",
     "dotenv": "^8.2.0",
+    "express": "^4.17.1",
     "fs-extra": "^9.0.1",
     "iconv-lite": "^0.6.2",
     "moment": "^2.29.1",
@@ -22,6 +26,7 @@
     "qs": "^6.9.4",
     "tough-cookie": "^4.0.0",
     "websocket": "^1.0.33",
+    "xml2js": "^0.4.23",
     "yargs": "^16.1.0"
   },
   "devDependencies": {

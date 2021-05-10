@@ -9,7 +9,7 @@ var fmtArgs = (k, v) => {
     return v
 }
 module.exports = {
-    async delCookiesFile(key) {
+    async delCookiesFile (key) {
         let dir = process.env.asm_save_data_dir
         if (!fs.existsSync(dir)) {
             fs.mkdirpSync(dir)
@@ -75,6 +75,9 @@ module.exports = {
                 if (isN) {
                     arg_group[t][arg_k_split.join('-')] = fmtArgs(arg_k_split.join('-'), arg)
                 } else {
+                    if (!('0' in arg_group)) {
+                        arg_group['0'] = {}
+                    }
                     arg_group['0'][arg_k] = fmtArgs(arg_k, arg)
                 }
             } else {
@@ -87,22 +90,22 @@ module.exports = {
         if ('accountSn' in argv && argv.accountSn) {
             let accountSns = (argv.accountSn + '').split(',')
             for (let sn of accountSns) {
-                if (('user-' + sn) in argv) {
-                    let account = {
-                        ...((sn in arg_group) ? arg_group[sn] : {}),
-                        tasks: argv['tasks-' + sn] || argv['tasks'] || ''
-                    }
-                    if (('tryrun-' + sn) in argv) {
-                        account['tryrun'] = true
-                    }
-                    accounts.push({
-                        ...arg_group['0'],
-                        ...account
-                    })
+                let account = {
+                    accountSn: sn,
+                    ...((sn in arg_group) ? arg_group[sn] : {}),
+                    tasks: argv['tasks-' + sn] || argv['tasks'] || ''
                 }
+                if (('tryrun-' + sn) in argv) {
+                    account['tryrun'] = true
+                }
+                accounts.push({
+                    ...arg_group['0'],
+                    ...account
+                })
             }
         } else {
             accounts.push({
+                accountSn: 1,
                 ...arg_group['0'],
                 tasks: argv['tasks'] || ''
             })

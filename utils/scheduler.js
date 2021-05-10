@@ -2,10 +2,12 @@ const os = require('os')
 const path = require('path')
 const fs = require('fs-extra')
 var moment = require('moment');
+const { Worker } = require('worker_threads')
 moment.locale('zh-cn');
 const { getCookies, saveCookies, delCookiesFile } = require('./util')
-const { TryNextEvent, CompleteEvent } = require('./EnumError')
+const { TryNextItem, StopTask, CompleteTask } = require('./EnumError')
 const _request = require('./request')
+const { logbuild } = require('../utils/log')
 var crypto = require('crypto');
 const { default: PQueue } = require('p-queue');
 
@@ -53,11 +55,14 @@ let scheduler = {
         scheduler.selectedTasks = [];
         scheduler.taskKey = 'default';
     },
-    updateTaskFile: (task, newTask) => {
+    updateTaskFile: (task, newTask, checkRun = false) => {
         let taskJson = fs.readFileSync(process.env.taskfile).toString('utf-8')
         taskJson = JSON.parse(taskJson)
         let taskindex = taskJson.queues.findIndex(q => q.taskName === task.taskName)
         if (taskindex !== -1) {
+            if (checkRun && taskJson.queues[taskindex].isRunning) {
+                return true
+            }
             taskJson.queues[taskindex] = {
                 ...taskJson.queues[taskindex],
                 ...newTask
@@ -78,7 +83,7 @@ let scheduler = {
             for (let replay of replayoptions) {
                 let mergeOptions = Object.assign({}, OgnOptions, replay)
                 let willTime = moment(randomDate(mergeOptions));
-                let waitTime = 0;
+                let waitTime = Math.floor(Math.random() * 120 + 10);
                 if (mergeOptions) {
                     if (mergeOptions.isCircle || mergeOptions.dev) {
                         willTime = moment().startOf('days');
@@ -102,7 +107,8 @@ let scheduler = {
                     taskState: 0,
                     willTime: willTime.format('YYYY-MM-DD HH:mm:ss'),
                     waitTime: waitTime,
-                    ignore: mergeOptions.ignore
+                    ignore: mergeOptions.ignore,
+                    immediate: mergeOptions.immediate
                 })
                 tasks[taskName + sn] = {
                     callback: tasks[taskName].callback,
@@ -239,7 +245,7 @@ let scheduler = {
             return a.waitTime - b.waitTime;
         })
         scheduler.selectedTasks = selectedTasks
-        console.info('计算可执行任务', '总任务数', queues.length, '已完成任务数', queues.filter(t => t.taskState === 1).length, '错误任务数', queues.filter(t => t.taskState === 2 && !t.ignore).length, '指定任务数', selectedTasks.length, '预计可执行任务数', will_tasks.length, '处于忽略状态任务', taskJson.queues.filter(t => !!t.ignore).length)
+        console.info('计算可执行任务', '总任务数', taskJson.queues.length, '已完成任务数', queues.filter(t => t.taskState === 1).length, '错误任务数', queues.filter(t => t.taskState === 2 && !t.ignore).length, '指定任务数', selectedTasks.length, '预计可执行任务数', will_tasks.length, '处于忽略状态任务', taskJson.queues.filter(t => !!t.ignore).length)
         return {
             taskJson,
             queues,
@@ -253,178 +259,246 @@ let scheduler = {
             replayoptions
         }
     },
-    hasWillTask: async (command, params) => {
-        const { taskKey, tryrun, concurrency, tasks: selectedTasks } = params
+    regTask2: async (taskName, callback, options, replayoptions) => {
+        tasks[taskName] = {
+            callback,
+            options,
+            replayoptions
+        }
+    },
+    completeTask: (err, task, logger) => {
+        var buildNextTime = (eventData, task, newTask) => {
+            let ttt = tasks[scheduler.OgnName(task)] || {}
+            if (eventData.relayTime) {
+                newTask.willTime = moment().add(eventData.relayTime, 'seconds').format('YYYY-MM-DD HH:mm:ss')
+            } else if (ttt.options?.intervalTime) {
+                newTask.willTime = moment().add(ttt.options?.intervalTime, 'seconds').format('YYYY-MM-DD HH:mm:ss')
+            } else if (ttt.options?.intervalHours) {
+                newTask.willTime = moment().add(ttt.options?.intervalHours, 'hours').format('YYYY-MM-DD HH:mm:ss')
+            } else {
+                newTask.willTime = moment().add(10, 'minutes').format('YYYY-MM-DD HH:mm:ss')
+            }
+            if (ttt.options?.isCircle) {
+                newTask.taskState = 0
+            } else {
+                newTask.taskState = 1
+            }
+            return newTask
+        }
+        if (err instanceof TryNextItem) {
+            let eventData = JSON.parse(err.message)
+            logger.error(eventData.message || '执行结束')
+            return {
+                ...buildNextTime(eventData, task, {
+                    failNum: 0
+                }),
+                taskState: 0
+            }
+        } else if (err instanceof CompleteTask) {
+            logger.info(err.message || '执行结束')
+            return buildNextTime({}, task, {
+                failNum: 0
+            })
+        } else if (err instanceof StopTask) {
+            logger.info(err.message || '执行结束')
+            return {
+                ...buildNextTime({}, task, {
+                    failNum: 0
+                }),
+                taskState: 1
+            }
+        } else {
+            logger.info('任务错误：', err)
+            if (task.failNum > 3) {
+                logger.notify('任务错误次数过多，停止该任务后续执行')
+                return {
+                    taskState: 2,
+                    taskRemark: `错误过多停止(fail:${task.failNum})`,
+                    failNum: 0
+                }
+            } else {
+                return {
+                    taskState: 0,
+                    failNum: task.failNum ? (parseInt(task.failNum) + 1) : 1
+                }
+            }
+        }
+    },
+    buildEnvTask: async (task, init_funcs_result) => {
+        let logger = { ...console, ...logbuild(task) }
+        global.logger = logger
+        let st = new Date().getTime();
+        let newTask = {}
+        try {
+            logger.info('开始执行', task.taskName)
+
+            let isrun = scheduler.updateTaskFile(task, {
+                // 限制执行时长2hours，runStopTime用于防止因意外原因导致isRunning=true的任务被中断，而未改变状态使得无法再次执行的问题
+                runStopTime: moment().add(2, 'hours').format('YYYY-MM-DD HH:mm:ss'),
+                isRunning: true
+            }, true)
+
+            if (isrun) {
+                throw new TryNextItem(JSON.stringify({
+                    message: `已经在运行了,跳过本次运行`,
+                    relayTime: 600
+                }))
+            }
+
+            let init_result = init_funcs_result[scheduler.OgnName(task) + '_init']
+            if (task.waitTime) {
+                logger.info('延迟执行', task.taskName, task.waitTime, 'seconds')
+                await new Promise((resolve, reject) => setTimeout(resolve, task.waitTime * 1000))
+            }
+            let ttt = tasks[scheduler.OgnName(task)] || {}
+            if (Object.prototype.toString.call(ttt.callback) === '[object String]') {
+                ttt.callback = [ttt.callback, 'doTask']
+            }
+            if (Object.prototype.toString.call(ttt.callback) === '[object Object]') {
+                ttt.callback = [ttt.callback.path, ttt.callback.method]
+            }
+            if (Object.prototype.toString.call(ttt.callback) === '[object Array]') {
+                if (ttt.options.init) {
+                    delete ttt.options.init
+                }
+                await new Promise((resolve, reject) => {
+                    let worker = new Worker(path.join(__dirname, 'taskActuator.js'), {
+                        workerData: {
+                            task: {
+                                ...task,
+                                ...ttt
+                            },
+                            argvs: scheduler.account,
+                            cookies: init_result.cookies
+                        }
+                    })
+                    worker.on('message', (msg) => {
+                        let message = JSON.parse(msg)
+                        if (message.type === 'TryNextItem') {
+                            reject(new TryNextItem(message.data))
+                        } else if (message.type === 'StopTask') {
+                            reject(new StopTask(message.data))
+                        } else if (message.type === 'CompleteTask') {
+                            reject(new CompleteTask())
+                        } else {
+                            reject(new Error(message.data))
+                        }
+                    })
+                    worker.on('exit', resolve)
+                })
+            } else if (Object.prototype.toString.call(ttt.callback) === '[object AsyncFunction]') {
+                delete init_result.cookies
+                await ttt.callback.apply(this, Object.values(init_result))
+                throw new CompleteTask()
+            } else {
+                throw new StopTask('任务执行内容空')
+            }
+        } catch (err) {
+            newTask = scheduler.completeTask(err, task, logger)
+        }
+        finally {
+            let time = new Date().getTime() - st;
+            logger.info('执行用时', Math.floor(time / 1000), '秒')
+            scheduler.updateTaskFile(task, {
+                ...newTask,
+                isRunning: false,
+                time
+            })
+        }
+    },
+    buildExecQueue: async (will_tasks, concurrency, init_funcs_result) => {
+        // 任务执行
+        let queue = new PQueue({ concurrency });
+        if (will_tasks.length) {
+            console.info('调度任务中', '并发数', concurrency)
+        }
+        for (let task of will_tasks) {
+            queue.add(async () => await scheduler.buildEnvTask(task, init_funcs_result))
+        }
+        await queue.onIdle()
+    },
+    execInitFunc: async (command, will_tasks) => {
+        let init_funcs = {}
+        let init_funcs_result = {}
+        for (let task of will_tasks) {
+
+            let logger = { ...console, ...logbuild(task) }
+            global.logger = logger
+            let ttt = tasks[scheduler.OgnName(task)] || {}
+            let tttOptions = ttt.options || {}
+
+            let savedCookies = await getCookies([command, scheduler.taskKey].join('_')) || tttOptions.cookies
+            let request = _request(savedCookies)
+
+            if (tttOptions.init) {
+                if (Object.prototype.toString.call(tttOptions.init) === '[object AsyncFunction]') {
+                    let hash = crypto.createHash('md5').update(tttOptions.init.toString()).digest('hex')
+                    if (!(hash in init_funcs)) {
+                        init_funcs_result[scheduler.OgnName(task) + '_init'] = {
+                            cookies: savedCookies,
+                            ...await tttOptions['init'](request, savedCookies)
+                        }
+                        init_funcs[hash] = scheduler.OgnName(task) + '_init'
+                    } else {
+                        init_funcs_result[scheduler.OgnName(task) + '_init'] = init_funcs_result[init_funcs[hash]]
+                    }
+                } else {
+                    console.info('not apply')
+                }
+            } else {
+                init_funcs_result[scheduler.OgnName(task) + '_init'] = { request, cookies: savedCookies }
+            }
+        }
+
+        return init_funcs_result
+    },
+    execTask: async (command, account, options) => {
+
+        console.info('开始执行任务')
+
         scheduler.clean()
-        scheduler.isTryRun = tryrun
-        scheduler.concurrency = concurrency || 1
-        scheduler.taskKey = (taskKey || 'default') + (tryrun ? '_tryrun' : '')
+        scheduler.isTryRun = options?.tryrun || false
+        scheduler.cleanCookie = options?.cc || false
+        scheduler.concurrency = options?.concurrency || 1
+        scheduler.taskKey = (account.taskKey || account.user || 'default') + (scheduler.isTryRun ? '_tryrun' : '')
+        scheduler.account = account
+        process.env['taskKey'] = [command, scheduler.taskKey].join('_')
+        process.env['command'] = command
+        scheduler.isRunning = true
+
         if (scheduler.isTryRun) {
             console.info('!!!当前运行在TryRun模式，仅建议在测试时运行!!!')
             await new Promise((resolve) => setTimeout(resolve, 3000))
         }
-        process.env['taskKey'] = [command, scheduler.taskKey].join('_')
-        process.env['command'] = command
         console.info('将使用', scheduler.taskKey.replaceWithMask(2, scheduler.isTryRun ? 10 : 3), '作为账户识别码')
+
         await scheduler.genFileName(command)
         await scheduler.initTasksQueue()
-        let { will_tasks } = await scheduler.loadTasksQueue(selectedTasks)
-        scheduler.isRunning = true
-        return will_tasks.length
-    },
-    execTask: async (command) => {
-        console.info('开始执行任务')
-        if (!scheduler.isRunning) {
-            await scheduler.genFileName(command)
-            await scheduler.initTasksQueue()
+        let { will_tasks } = await scheduler.loadTasksQueue(account.tasks)
+
+        if (!will_tasks.length) {
+            console.info('暂无可执行任务！')
+            return
         }
 
-        let { taskJson, queues, will_tasks, selectedTasks } = scheduler
-
+        let { selectedTasks } = scheduler
         if (selectedTasks.length) {
             console.info('将只执行选择的任务', selectedTasks.join(','))
         }
 
-        if (will_tasks.length) {
-            if (scheduler.isTryRun) {
-                await delCookiesFile([command, scheduler.taskKey].join('_'))
-            }
+        // 初始化处理
+        let init_funcs_result = await scheduler.execInitFunc(command, will_tasks)
 
-            // 初始化处理
-            let init_funcs = {}
-            let init_funcs_result = {}
-            for (let task of will_tasks) {
-                process.env['current_task'] = task.taskName
-                let ttt = tasks[scheduler.OgnName(task)] || {}
-                let tttOptions = ttt.options || {}
+        // 立即任务
+        await scheduler.buildExecQueue(will_tasks.filter(t => t.immediate), 100, init_funcs_result)
 
-                let savedCookies = await getCookies([command, scheduler.taskKey].join('_')) || tttOptions.cookies
-                let request = _request(savedCookies)
+        // 普通任务
+        await scheduler.buildExecQueue(will_tasks.filter(t => !t.immediate), scheduler.concurrency || 1, init_funcs_result)
 
-                if (tttOptions.init) {
-                    if (Object.prototype.toString.call(tttOptions.init) === '[object AsyncFunction]') {
-                        let hash = crypto.createHash('md5').update(tttOptions.init.toString()).digest('hex')
-                        if (!(hash in init_funcs)) {
-                            init_funcs_result[scheduler.OgnName(task) + '_init'] = await tttOptions['init'](request, savedCookies)
-                            init_funcs[hash] = scheduler.OgnName(task) + '_init'
-                        } else {
-                            init_funcs_result[scheduler.OgnName(task) + '_init'] = init_funcs_result[init_funcs[hash]]
-                        }
-                    } else {
-                        console.info('not apply')
-                    }
-                } else {
-                    init_funcs_result[scheduler.OgnName(task) + '_init'] = { request }
-                }
-            }
+        await console.sendLog()
 
-            // 任务执行
-            // 多个任务同时执行会导致日志记录类型错误，所以仅在tryRun模式开启多个任务并发执行
-            let concurrency = scheduler.concurrency || 1
-            let queue = new PQueue({ concurrency });
-            console.info('调度任务中', '并发数', concurrency)
-            for (let task of will_tasks) {
-                scheduler.updateTaskFile(task, {
-                    // 限制执行时长2hours，runStopTime用于防止因意外原因导致isRunning=true的任务被中断，而未改变状态使得无法再次执行的问题
-                    runStopTime: moment().add(2, 'hours').format('YYYY-MM-DD HH:mm:ss'),
-                    isRunning: true
-                })
-                queue.add(async () => {
-                    process.env['current_task'] = task.taskName
-                    var st = new Date().getTime();
-                    try {
-                        let ttt = tasks[scheduler.OgnName(task)] || {}
-                        if (task.waitTime) {
-                            console.info('延迟执行', task.taskName, task.waitTime, 'seconds')
-                            await new Promise((resolve, reject) => setTimeout(resolve, task.waitTime * 1000))
-                        }
-                        if (Object.prototype.toString.call(ttt.callback) === '[object AsyncFunction]') {
-                            await ttt.callback.apply(this, Object.values(init_funcs_result[scheduler.OgnName(task) + '_init']))
-                        } else {
-                            console.info('任务执行内容空')
-                        }
-
-                        let isupdate = false
-                        let newTask = {}
-                        if (ttt.options) {
-                            if (!ttt.options.isCircle) {
-                                newTask.taskState = 1
-                                isupdate = true
-                            }
-                            if (ttt.options.isCircle) {
-                                if (ttt.options.intervalTime) {
-                                    newTask.willTime = moment().add(ttt.options.intervalTime, 'seconds').format('YYYY-MM-DD HH:mm:ss')
-                                } else if (ttt.options.intervalHours) {
-                                    newTask.willTime = moment().add(ttt.options.intervalHours, 'hours').format('YYYY-MM-DD HH:mm:ss')
-                                }
-                                isupdate = true
-                            }
-                        } else {
-                            newTask.taskState = 1
-                            isupdate = true
-                        }
-
-                        if (isupdate) {
-                            scheduler.updateTaskFile(task, newTask)
-                        }
-                    } catch (err) {
-                        if (err instanceof TryNextEvent) {
-                            let eventData = JSON.parse(err.message)
-                            console.error(eventData.message)
-                            let newTask = {
-                                taskState: 0,
-                                willTime: moment().add(10, 'minutes').format('YYYY-MM-DD HH:mm:ss')
-                            }
-                            let ttt = tasks[scheduler.OgnName(task)] || {}
-                            if (eventData.relayTime) {
-                                newTask.willTime = moment().add(eventData.relayTime, 'seconds').format('YYYY-MM-DD HH:mm:ss')
-                            } else if (ttt.options?.intervalTime) {
-                                newTask.willTime = moment().add(ttt.options?.intervalTime, 'seconds').format('YYYY-MM-DD HH:mm:ss')
-                            } else if (ttt.options?.intervalHours) {
-                                newTask.willTime = moment().add(ttt.options?.intervalHours, 'hours').format('YYYY-MM-DD HH:mm:ss')
-                            }
-                            scheduler.updateTaskFile(task, newTask)
-                        } else if (err instanceof CompleteEvent) {
-                            console.info(err.message)
-                            let newTask = {
-                                failNum: 0,
-                                taskState: 1
-                            }
-                            scheduler.updateTaskFile(task, newTask)
-                        } else {
-                            console.info('任务错误：', err)
-                            if (task.failNum > 3) {
-                                console.error('任务错误次数过多，停止该任务后续执行')
-                                let newTask = {
-                                    taskState: 2,
-                                    taskRemark: '错误过多停止'
-                                }
-                                console.notify('任务错误次数过多，停止该任务后续执行')
-                                scheduler.updateTaskFile(task, newTask)
-                            } else {
-                                let newTask = {
-                                    failNum: task.failNum ? (parseInt(task.failNum) + 1) : 1
-                                }
-                                scheduler.updateTaskFile(task, newTask)
-                            }
-                        }
-                    }
-                    finally {
-                        var time = new Date().getTime() - st;
-                        console.info(task.taskName, '执行用时', Math.floor(time / 1000), '秒')
-                        scheduler.updateTaskFile(task, {
-                            isRunning: false,
-                            time
-                        })
-                    }
-                })
-            }
-            await queue.onIdle()
-            delete process.env.current_task
-
-            await console.sendLog()
-        } else {
-            console.info('暂无需要执行的任务')
+        if (scheduler.cleanCookie) {
+            await delCookiesFile([command, scheduler.taskKey].join('_'))
         }
     }
 }
