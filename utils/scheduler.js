@@ -420,6 +420,7 @@ let scheduler = {
     execInitFunc: async (command, will_tasks) => {
         let init_funcs = {}
         let init_funcs_result = {}
+        let tasks_result = []
         for (let task of will_tasks) {
 
             let logger = { ...console, ...logbuild(task) }
@@ -433,24 +434,30 @@ let scheduler = {
             if (tttOptions.init) {
                 if (Object.prototype.toString.call(tttOptions.init) === '[object AsyncFunction]') {
                     let hash = crypto.createHash('md5').update(tttOptions.init.toString()).digest('hex')
-                    if (!(hash in init_funcs)) {
-                        init_funcs_result[scheduler.OgnName(task) + '_init'] = {
-                            cookies: savedCookies,
-                            ...await tttOptions['init'](request, savedCookies)
+                    let init_result = await tttOptions['init'](request, savedCookies)
+                    if (Object.prototype.toString.call(init_result) === '[object Object]') {
+                        tasks_result.push(task)
+                        if (!(hash in init_funcs)) {
+                            init_funcs_result[scheduler.OgnName(task) + '_init'] = {
+                                cookies: savedCookies,
+                                ...init_result
+                            }
+                            init_funcs[hash] = scheduler.OgnName(task) + '_init'
+                        } else {
+                            init_funcs_result[scheduler.OgnName(task) + '_init'] = init_funcs_result[init_funcs[hash]]
                         }
-                        init_funcs[hash] = scheduler.OgnName(task) + '_init'
                     } else {
-                        init_funcs_result[scheduler.OgnName(task) + '_init'] = init_funcs_result[init_funcs[hash]]
+                        logger.info('跳过执行', task.taskName)
                     }
                 } else {
-                    console.info('not apply')
+                    logger.info('not apply')
                 }
             } else {
                 init_funcs_result[scheduler.OgnName(task) + '_init'] = { request, cookies: savedCookies }
             }
         }
 
-        return init_funcs_result
+        return { tasks_result, init_funcs_result }
     },
     execTask: async (command, account, options) => {
 
@@ -487,13 +494,13 @@ let scheduler = {
         }
 
         // 初始化处理
-        let init_funcs_result = await scheduler.execInitFunc(command, will_tasks)
+        let { tasks_result, init_funcs_result } = await scheduler.execInitFunc(command, will_tasks)
 
         // 立即任务
-        await scheduler.buildExecQueue(will_tasks.filter(t => t.immediate), 100, init_funcs_result)
+        await scheduler.buildExecQueue(tasks_result.filter(t => t.immediate), 100, init_funcs_result)
 
         // 普通任务
-        await scheduler.buildExecQueue(will_tasks.filter(t => !t.immediate), scheduler.concurrency || 1, init_funcs_result)
+        await scheduler.buildExecQueue(tasks_result.filter(t => !t.immediate), scheduler.concurrency || 1, init_funcs_result)
 
         await console.sendLog()
 

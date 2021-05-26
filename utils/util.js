@@ -92,11 +92,13 @@ module.exports = {
             for (let sn of accountSns) {
                 let account = {
                     accountSn: sn,
-                    ...((sn in arg_group) ? arg_group[sn] : {}),
-                    tasks: argv['tasks-' + sn] || argv['tasks'] || ''
+                    ...((sn in arg_group) ? arg_group[sn] : {})
                 }
                 if (('tryrun-' + sn) in argv) {
                     account['tryrun'] = true
+                }
+                if (argv['tasks-' + sn] || argv['tasks'] || '') {
+                    account['tasks'] = argv['tasks-' + sn] || argv['tasks'] || ''
                 }
                 accounts.push({
                     ...arg_group['0'],
@@ -104,11 +106,14 @@ module.exports = {
                 })
             }
         } else {
-            accounts.push({
+            let account = {
                 accountSn: 1,
-                ...arg_group['0'],
-                tasks: argv['tasks'] || ''
-            })
+                ...arg_group['0']
+            }
+            if (argv['tasks'] || '') {
+                account['tasks'] = argv['tasks'] || ''
+            }
+            accounts.push(account)
         }
         return accounts
     },
@@ -123,5 +128,20 @@ module.exports = {
             result[key] = decodeURIComponent(allcookies[key]) || ''
         }
         return result
+    },
+    ExecCommand: async (command, params, options, callback) => {
+        let scheduler = await require(path.join('../commands', 'tasks', command, command)).start({
+            cookies: params.options.cookies,
+            options: params.options.account
+        }).catch(err => console.error(err))
+        await scheduler.execTask(command, {
+            ...params.options.account,
+            taskKey: params.taskKey
+        }, options).catch(err => console.error(err)).finally(() => {
+            if (callback) {
+                callback(scheduler)
+            }
+            console.info('当前任务执行完毕！')
+        })
     }
 }
