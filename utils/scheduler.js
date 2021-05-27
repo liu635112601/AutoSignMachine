@@ -11,10 +11,6 @@ const { logbuild } = require('../utils/log')
 var crypto = require('crypto');
 const { default: PQueue } = require('p-queue');
 
-String.prototype.replaceWithMask = function (start, end) {
-    return this.substr(0, start) + '******' + this.substr(-end, end)
-}
-
 const randomDate = (options) => {
     let startDate = moment();
     let endDate = moment().endOf('days').subtract(3, 'hours');
@@ -118,7 +114,7 @@ let scheduler = {
         }
         return queues
     },
-    OgnName(task) {
+    OgnName (task) {
         return task.taskName.replace(task.taskSn || '', '')
     },
     getSomeNewTaskNames: (existsTasks, newAllTaskNames) => {
@@ -167,7 +163,7 @@ let scheduler = {
         }
         scheduler.today = today
     },
-    genFileName(command) {
+    genFileName (command) {
         if (process.env.asm_func === 'true') {
             // 暂不支持持久化配置，使用一次性执行机制，函数超时时间受functions.timeout影响
             scheduler.isTryRun = true
@@ -324,9 +320,14 @@ let scheduler = {
             }
         }
     },
-    buildEnvTask: async (task, init_funcs_result) => {
-        let logger = { ...console, ...logbuild(task) }
-        global.logger = logger
+    buildEnvTask: async (command, task, init_funcs_result) => {
+        let logger = {
+            ...console, ...logbuild([
+                command,
+                task.taskName,
+                scheduler.taskKey.replace('_tryrun', '').replaceWithMask(2, 3)
+            ])
+        }
         let st = new Date().getTime();
         let newTask = {}
         try {
@@ -406,14 +407,14 @@ let scheduler = {
             })
         }
     },
-    buildExecQueue: async (will_tasks, concurrency, init_funcs_result) => {
+    buildExecQueue: async (command, will_tasks, concurrency, init_funcs_result) => {
         // 任务执行
         let queue = new PQueue({ concurrency });
         if (will_tasks.length) {
             console.info('调度任务中', '并发数', concurrency)
         }
         for (let task of will_tasks) {
-            queue.add(async () => await scheduler.buildEnvTask(task, init_funcs_result))
+            queue.add(async () => await scheduler.buildEnvTask(command, task, init_funcs_result))
         }
         await queue.onIdle()
     },
@@ -421,10 +422,23 @@ let scheduler = {
         let init_funcs = {}
         let init_funcs_result = {}
         let tasks_result = []
+        let bindLog = (obj, key, val) => {
+            Object.defineProperty(obj, key, {
+                enumerable: true,
+                configurable: true,
+                writable: true,
+                value: val
+            })
+        }
         for (let task of will_tasks) {
 
-            let logger = { ...console, ...logbuild(task) }
-            global.logger = logger
+            let logger = {
+                ...console, ...logbuild([
+                    command,
+                    task.taskName,
+                    scheduler.taskKey.replace('_tryrun', '').replaceWithMask(2, 3)
+                ])
+            }
             let ttt = tasks[scheduler.OgnName(task)] || {}
             let tttOptions = ttt.options || {}
 
@@ -435,6 +449,14 @@ let scheduler = {
                 if (Object.prototype.toString.call(tttOptions.init) === '[object AsyncFunction]') {
                     let hash = crypto.createHash('md5').update(tttOptions.init.toString()).digest('hex')
                     let init_result = await tttOptions['init'](request, savedCookies)
+
+                    if (init_result.request !== undefined) {
+                        bindLog(init_result.request, 'logger', logger)
+                    } else {
+                        bindLog(request, 'logger', logger)
+                        bindLog(init_result, 'request', request)
+                    }
+
                     if (Object.prototype.toString.call(init_result) === '[object Object]') {
                         tasks_result.push(task)
                         if (!(hash in init_funcs)) {
@@ -470,7 +492,6 @@ let scheduler = {
         scheduler.taskKey = (account.taskKey || account.user || 'default') + (scheduler.isTryRun ? '_tryrun' : '')
         scheduler.account = account
         process.env['taskKey'] = [command, scheduler.taskKey].join('_')
-        process.env['command'] = command
         scheduler.isRunning = true
 
         if (scheduler.isTryRun) {
@@ -497,10 +518,10 @@ let scheduler = {
         let { tasks_result, init_funcs_result } = await scheduler.execInitFunc(command, will_tasks)
 
         // 立即任务
-        await scheduler.buildExecQueue(tasks_result.filter(t => t.immediate), 100, init_funcs_result)
+        await scheduler.buildExecQueue(command, tasks_result.filter(t => t.immediate), 100, init_funcs_result)
 
         // 普通任务
-        await scheduler.buildExecQueue(tasks_result.filter(t => !t.immediate), scheduler.concurrency || 1, init_funcs_result)
+        await scheduler.buildExecQueue(command, tasks_result.filter(t => !t.immediate), scheduler.concurrency || 1, init_funcs_result)
 
         await console.sendLog()
 

@@ -5,7 +5,13 @@ const { logbuild } = require('./log');
 
 (async () => {
   try {
-    global.logger = { ...console, ...logbuild(workerData.task) };
+    let logger = {
+      ...console, ...logbuild([
+        workerData.task.options.command || 'asm',
+        workerData.task.taskName,
+        'worker'
+      ])
+    };
     let [file, method] = workerData.task.callback
     let task = require(file)
     let _request = request(workerData.task.options.cookies)

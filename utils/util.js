@@ -61,8 +61,12 @@ module.exports = {
         )
     },
     buildArgs: (argv) => {
-        var accounts = []
-        var arg_group = {}
+        let filters = argv.filter?.split(';').map(t => {
+            let [k, v] = t.split('=')
+            return [k, v]
+        }) || []
+        let accounts = []
+        let arg_group = {}
         for (let arg_k in argv) {
             let arg = argv[arg_k]
             if (arg_k.indexOf('-') !== -1) {
@@ -114,6 +118,17 @@ module.exports = {
                 account['tasks'] = argv['tasks'] || ''
             }
             accounts.push(account)
+        }
+        if (filters.length) {
+            let filterds = []
+            for (let account of accounts) {
+                for (let [filter_k, filter_v] of filters) {
+                    if (filter_k in account && account[filter_k] === filter_v) {
+                        filterds.push(account)
+                    }
+                }
+            }
+            accounts = filterds
         }
         return accounts
     },

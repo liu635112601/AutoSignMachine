@@ -2,8 +2,13 @@ const yargs = require('yargs/yargs')
 const os = require('os')
 const path = require('path')
 const fs = require('fs-extra')
-const log = require('./utils/log')
 const dotenv = require("dotenv")
+
+String.prototype.replaceWithMask = function (start, end) {
+  return this.substr(0, start) + '******' + this.substr(-end, end)
+}
+
+// https://t.me/joinchat/5kL7F6q2IQVlM2U1
 
 function registerEvn (argvs) {
 

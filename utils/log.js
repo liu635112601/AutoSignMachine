@@ -125,9 +125,9 @@ var notify = {
     },
     buildMsg: () => {
         let msg = ''
-        for (let taskName in notify_logs) {
-            msg += `**以下为${taskName}任务消息**\n\n`
-            msg += notify_logs[taskName].join('\n')
+        for (let log_key in notify_logs) {
+            msg += `**以下为${log_key}任务消息**\n\n`
+            msg += notify_logs[log_key].join('\n')
         }
         return msg
     },
@@ -173,40 +173,38 @@ var wrapper_color = (type, msg) => {
     }
     return msg
 }
-var stdout_task_msg = (task, msg) => {
-    if (task.taskName) {
-        msg = `${task.taskName}: ` + msg
-    }
-    process.stdout.write(msg + '\n')
+
+var stdout_task_msg = (log_key, msg) => {
+    process.stdout.write(`${log_key} ` + msg + '\n')
 }
 
 console.sendLog = notify.sendLog
 module.exports = {
     notify,
-    logbuild (task) {
-        var log = {}
+    logbuild (parts) {
+        let [command = 'asm', taskName = 'normal', taskKey = 'log'] = parts
+        let log = {}
+        let log_key = `[${command}:${taskKey}:${taskName}]`
         log.notify = function () {
-            if (task.taskName) {
-                if (!(task.taskName in notify_logs)) {
-                    notify_logs[task.taskName] = []
-                }
-                notify_logs[task.taskName].push(util.format.apply(null, arguments) + '\n')
+            if (!(log_key in notify_logs)) {
+                notify_logs[log_key] = []
             }
-            stdout_task_msg(task, util.format.apply(null, arguments))
+            notify_logs[log_key].push(util.format.apply(null, arguments) + '\n')
+            stdout_task_msg(log_key, util.format.apply(null, arguments))
         }
 
         log.log = function () {
             if (process.env.asm_verbose === 'true') {
-                stdout_task_msg(task, util.format.apply(null, arguments))
+                stdout_task_msg(log_key, util.format.apply(null, arguments))
             }
         }
 
         log.info = function () {
-            stdout_task_msg(task, util.format.apply(null, arguments))
+            stdout_task_msg(log_key, util.format.apply(null, arguments))
         }
 
         log.error = function () {
-            stdout_task_msg(task, wrapper_color('error', util.format.apply(null, arguments)))
+            stdout_task_msg(log_key, wrapper_color('error', util.format.apply(null, arguments)))
         }
 
         log.reward = function () {
@@ -217,22 +215,9 @@ module.exports = {
             } else if (arguments.length === 1) {
                 type = arguments[0]
                 num = 1
-
-                if (arguments[0].indexOf('奖励积分') !== -1) {
-                    type = 'integral'
-                    num = parseFloat(arguments[0])
-                }
-                if (arguments[0].indexOf('通信积分') !== -1) {
-                    type = 'txintegral'
-                    num = parseFloat(arguments[0])
-                }
-                if (arguments[0].indexOf('定向积分') !== -1) {
-                    type = 'dxintegral'
-                    num = parseFloat(arguments[0])
-                }
             }
 
-            stdout_task_msg(task, wrapper_color('reward', util.format.apply(null, [type, num])))
+            stdout_task_msg(log_key, wrapper_color('reward', util.format.apply(null, [type, num])))
 
             let taskJson = fs.readFileSync(process.env.taskfile).toString('utf-8')
             taskJson = JSON.parse(taskJson)
