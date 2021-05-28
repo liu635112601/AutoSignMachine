@@ -114,7 +114,7 @@ let scheduler = {
         }
         return queues
     },
-    OgnName (task) {
+    OgnName(task) {
         return task.taskName.replace(task.taskSn || '', '')
     },
     getSomeNewTaskNames: (existsTasks, newAllTaskNames) => {
@@ -163,7 +163,7 @@ let scheduler = {
         }
         scheduler.today = today
     },
-    genFileName (command) {
+    genFileName(command) {
         if (process.env.asm_func === 'true') {
             // 暂不支持持久化配置，使用一次性执行机制，函数超时时间受functions.timeout影响
             scheduler.isTryRun = true
@@ -321,13 +321,8 @@ let scheduler = {
         }
     },
     buildEnvTask: async (command, task, init_funcs_result) => {
-        let logger = {
-            ...console, ...logbuild([
-                command,
-                task.taskName,
-                scheduler.taskKey.replace('_tryrun', '').replaceWithMask(2, 3)
-            ])
-        }
+
+        let logger = task.logger
         let st = new Date().getTime();
         let newTask = {}
         try {
@@ -388,8 +383,10 @@ let scheduler = {
                     worker.on('exit', resolve)
                 })
             } else if (Object.prototype.toString.call(ttt.callback) === '[object AsyncFunction]') {
-                delete init_result.cookies
-                await ttt.callback.apply(this, Object.values(init_result))
+                await ttt.callback.apply(this, [{
+                    ...init_result.request,
+                    logger
+                }])
                 throw new CompleteTask()
             } else {
                 throw new StopTask('任务执行内容空')
@@ -422,16 +419,10 @@ let scheduler = {
         let init_funcs = {}
         let init_funcs_result = {}
         let tasks_result = []
-        let bindLog = (obj, key, val) => {
-            Object.defineProperty(obj, key, {
-                enumerable: true,
-                configurable: true,
-                writable: true,
-                value: val
-            })
-        }
         for (let task of will_tasks) {
-
+            let ttt = tasks[scheduler.OgnName(task)] || {}
+            let tttOptions = ttt.options || {}
+            let savedCookies = await getCookies([command, scheduler.taskKey].join('_')) || tttOptions.cookies
             let logger = {
                 ...console, ...logbuild([
                     command,
@@ -439,43 +430,43 @@ let scheduler = {
                     scheduler.taskKey.replace('_tryrun', '').replaceWithMask(2, 3)
                 ])
             }
-            let ttt = tasks[scheduler.OgnName(task)] || {}
-            let tttOptions = ttt.options || {}
-
-            let savedCookies = await getCookies([command, scheduler.taskKey].join('_')) || tttOptions.cookies
-            let request = _request(savedCookies)
-
+            let request = {
+                ..._request(savedCookies),
+                logger
+            }
+            let init_key = scheduler.OgnName(task) + '_init'
             if (tttOptions.init) {
                 if (Object.prototype.toString.call(tttOptions.init) === '[object AsyncFunction]') {
                     let hash = crypto.createHash('md5').update(tttOptions.init.toString()).digest('hex')
-                    let init_result = await tttOptions['init'](request, savedCookies)
-
-                    if (init_result.request !== undefined) {
-                        bindLog(init_result.request, 'logger', logger)
-                    } else {
-                        bindLog(request, 'logger', logger)
-                        bindLog(init_result, 'request', request)
-                    }
-
-                    if (Object.prototype.toString.call(init_result) === '[object Object]') {
-                        tasks_result.push(task)
-                        if (!(hash in init_funcs)) {
-                            init_funcs_result[scheduler.OgnName(task) + '_init'] = {
+                    let init_result = false
+                    if (!(hash in init_funcs)) {
+                        init_result = await tttOptions['init'](request, savedCookies)
+                        if (init_result !== false) {
+                            init_funcs_result[init_key] = {
                                 cookies: savedCookies,
                                 ...init_result
                             }
-                            init_funcs[hash] = scheduler.OgnName(task) + '_init'
                         } else {
-                            init_funcs_result[scheduler.OgnName(task) + '_init'] = init_funcs_result[init_funcs[hash]]
+                            init_funcs_result[init_key] = false
                         }
+                        init_funcs[hash] = init_key
                     } else {
-                        logger.info('跳过执行', task.taskName)
+                        init_funcs_result[init_key] = init_funcs_result[init_funcs[hash]]
+                    }
+
+                    if (init_funcs_result[init_key] !== false) {
+                        tasks_result.push({
+                            ...task,
+                            logger
+                        })
+                    } else {
+                        logger.info('初始化条件失败，跳过执行', task.taskName)
                     }
                 } else {
-                    logger.info('not apply')
+                    logger.info('不支持的初始化参数', task.taskName)
                 }
             } else {
-                init_funcs_result[scheduler.OgnName(task) + '_init'] = { request, cookies: savedCookies }
+                init_funcs_result[init_key] = { request, cookies: savedCookies }
             }
         }
 

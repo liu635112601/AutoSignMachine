@@ -11,7 +11,7 @@ var transParams = (data) => {
 
 var notify_logs = {}
 
-function isInteger (obj) {
+function isInteger(obj) {
     return typeof obj === 'number' && obj % 1 === 0
 }
 var notify = {
@@ -103,9 +103,9 @@ var notify = {
                 method: 'post',
                 data: {
                     "touser": "@all",
-                    "msgtype": "text",
+                    "msgtype": "markdown",
                     "agentid": process.env.notify_wechat_agentld,
-                    "text": { "content": desp }
+                    "markdown": { "content": desp }
                 }
             }).catch(err => console.log('发送失败'))
         }
@@ -131,6 +131,14 @@ var notify = {
         }
         return msg
     },
+    build_corp_wechat_msg: () => {
+        let msg = ''
+        for (let log_key in notify_logs) {
+            msg += `**${log_key.replace(/:/g, '-')}**\n\n`
+            msg += notify_logs[log_key].join('\n')
+        }
+        return msg
+    },
     sendLog: async () => {
         if (process.env.notify_sctkey) {
             notify.sct_send(notify.buildMsg())
@@ -148,7 +156,7 @@ var notify = {
             notify.pushplus_send(notify.buildMsg())
         }
         if (process.env.notify_wechat_corpid && process.env.notify_wechat_corpsecret && process.env.notify_wechat_agentld) {
-            notify.corp_wechat_send(notify.buildMsg())
+            notify.corp_wechat_send(notify.build_corp_wechat_msg())
         }
         if (process.env.notify_wechat_bottoken) {
             notify.corp_wechat_bot_send(notify.buildMsg())
@@ -181,10 +189,10 @@ var stdout_task_msg = (log_key, msg) => {
 console.sendLog = notify.sendLog
 module.exports = {
     notify,
-    logbuild (parts) {
+    logbuild(parts) {
         let [command = 'asm', taskName = 'normal', taskKey = 'log'] = parts
         let log = {}
-        let log_key = `[${command}:${taskKey}:${taskName}]`
+        let log_key = `${command}:${taskKey}:${taskName}`
         log.notify = function () {
             if (!(log_key in notify_logs)) {
                 notify_logs[log_key] = []
@@ -208,14 +216,7 @@ module.exports = {
         }
 
         log.reward = function () {
-            let type, num
-            if (arguments.length === 2) {
-                type = arguments[0]
-                num = arguments[1]
-            } else if (arguments.length === 1) {
-                type = arguments[0]
-                num = 1
-            }
+            let [type, num = 1] = Array.prototype.slice.call(arguments)
 
             stdout_task_msg(log_key, wrapper_color('reward', util.format.apply(null, [type, num])))
 
