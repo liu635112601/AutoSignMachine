@@ -60,7 +60,7 @@ module.exports = cookies => {
     if (['ETIMEDOUT', 'ECONNABORTED', 'ECONNRESET'].indexOf(err.code) !== -1) {
       reson = '出现网络超时错误'
       isNeedRetry = true
-    } else if (err.response && [500, 501, 502, 503, 504].indexOf(err.response.status) !== -1) {
+    } else if (err.response && [501, 502, 503, 504].indexOf(err.response.status) !== -1) {
       reson = '远程服务暂不可用'
       isNeedRetry = true
     } else if (err.response && [403, 404, 405].indexOf(err.response.status) !== -1) {

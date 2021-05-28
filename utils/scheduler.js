@@ -383,10 +383,11 @@ let scheduler = {
                     worker.on('exit', resolve)
                 })
             } else if (Object.prototype.toString.call(ttt.callback) === '[object AsyncFunction]') {
+                delete init_result.cookies
                 await ttt.callback.apply(this, [{
                     ...init_result.request,
                     logger
-                }])
+                }, ...[init_result.data]])
                 throw new CompleteTask()
             } else {
                 throw new StopTask('任务执行内容空')
