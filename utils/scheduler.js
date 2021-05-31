@@ -10,6 +10,7 @@ const _request = require('./request')
 const { logbuild } = require('../utils/log')
 var crypto = require('crypto');
 const { default: PQueue } = require('p-queue');
+const TaskStore = require('./TaskStore')
 
 const randomDate = (options) => {
     let startDate = moment();
@@ -36,36 +37,16 @@ let scheduler = {
     today: '',
     isRunning: false,
     isTryRun: false,
-    taskJson: undefined,
     queues: [],
     will_tasks: [],
-    selectedTasks: [],
-    taskKey: 'default',
+    userKey: 'default',
     clean: async () => {
         scheduler.today = '';
         scheduler.isRunning = false;
         scheduler.isTryRun = false;
-        scheduler.taskJson = undefined;
         scheduler.queues = [];
         scheduler.will_tasks = [];
-        scheduler.selectedTasks = [];
-        scheduler.taskKey = 'default';
-    },
-    updateTaskFile: (task, newTask, checkRun = false) => {
-        let taskJson = fs.readFileSync(process.env.taskfile).toString('utf-8')
-        taskJson = JSON.parse(taskJson)
-        let taskindex = taskJson.queues.findIndex(q => q.taskName === task.taskName)
-        if (taskindex !== -1) {
-            if (checkRun && taskJson.queues[taskindex].isRunning) {
-                return true
-            }
-            taskJson.queues[taskindex] = {
-                ...taskJson.queues[taskindex],
-                ...newTask
-            }
-        }
-        scheduler.taskJson = taskJson
-        fs.writeFileSync(scheduler.taskFile, JSON.stringify(scheduler.taskJson))
+        scheduler.userKey = 'default';
     },
     buildQueues: async (taskNames, queues) => {
         for (let taskName of taskNames) {
@@ -114,7 +95,7 @@ let scheduler = {
         }
         return queues
     },
-    OgnName(task) {
+    OgnName (task) {
         return task.taskName.replace(task.taskSn || '', '')
     },
     getSomeNewTaskNames: (existsTasks, newAllTaskNames) => {
@@ -122,8 +103,7 @@ let scheduler = {
         let notExistsTaskNames = newAllTaskNames.filter(n => existsTaskNames.indexOf(n) === -1)
         return notExistsTaskNames
     },
-    initTasksQueue: async () => {
-        const today = moment().format('YYYYMMDD')
+    initTasksQueue: async (today) => {
         if (!fs.existsSync(scheduler.taskFile) || scheduler.isTryRun) {
             console.info('初始化配置中')
             let queues = await scheduler.buildQueues(Object.keys(tasks), [])
@@ -161,24 +141,8 @@ let scheduler = {
                 }
             }
         }
-        scheduler.today = today
     },
-    genFileName(command) {
-        if (process.env.asm_func === 'true') {
-            // 暂不支持持久化配置，使用一次性执行机制，函数超时时间受functions.timeout影响
-            scheduler.isTryRun = true
-        }
-        let dir = process.env.asm_save_data_dir
-        if (!fs.existsSync(dir)) {
-            fs.mkdirpSync(dir)
-        }
-        scheduler.taskFile = path.join(dir, `taskFile_${command}_${scheduler.taskKey}.json`)
-        process.env['taskfile'] = scheduler.taskFile
-        scheduler.today = moment().format('YYYYMMDD')
-        let maskFile = path.join(dir, `taskFile_${command}_${scheduler.taskKey.replaceWithMask(2, scheduler.isTryRun ? 10 : 3)}.json`)
-        console.info('获得配置文件', maskFile, '当前日期', scheduler.today)
-    },
-    loadTasksQueue: async (selectedTasks) => {
+    loadTasksQueue: async (selectedTasks, command) => {
         let queues = []
         let will_tasks = []
         let taskJson = {}
@@ -235,13 +199,31 @@ let scheduler = {
             )
         }
 
-        scheduler.taskJson = taskJson
+        let banTasks = []
+        if (Object.prototype.toString.call(process.env['ban_' + command + '_tasks']) == '[object String]') {
+            banTasks = process.env['ban_' + command + '_tasks'].split(',')
+        }
+
+        will_tasks = will_tasks.filter(w => banTasks.indexOf(scheduler.OgnName(w)) === -1)
+
         scheduler.queues = queues
         scheduler.will_tasks = will_tasks.sort((a, b) => {
             return a.waitTime - b.waitTime;
         })
-        scheduler.selectedTasks = selectedTasks
-        console.info('计算可执行任务', '总任务数', taskJson.queues.length, '已完成任务数', queues.filter(t => t.taskState === 1).length, '错误任务数', queues.filter(t => t.taskState === 2 && !t.ignore).length, '指定任务数', selectedTasks.length, '预计可执行任务数', will_tasks.length, '处于忽略状态任务', taskJson.queues.filter(t => !!t.ignore).length)
+        console.info('计算可执行任务',
+            '总任务数', taskJson.queues.length,
+            '已完成任务数', queues.filter(t => t.taskState === 1).length,
+            '错误任务数', queues.filter(t => t.taskState === 2 && !t.ignore).length,
+            '指定任务数', selectedTasks.length,
+            '预计可执行任务数', will_tasks.length,
+            '处于忽略状态任务', taskJson.queues.filter(t => !!t.ignore).length,
+            '禁止运行的任务', banTasks.length
+        )
+
+        if (selectedTasks.length) {
+            console.info('将只执行选择的任务', selectedTasks.join(','))
+        }
+
         return {
             taskJson,
             queues,
@@ -255,14 +237,7 @@ let scheduler = {
             replayoptions
         }
     },
-    regTask2: async (taskName, callback, options, replayoptions) => {
-        tasks[taskName] = {
-            callback,
-            options,
-            replayoptions
-        }
-    },
-    completeTask: (err, task, logger) => {
+    buildTaskResult: (err, task, logger) => {
         var buildNextTime = (eventData, task, newTask) => {
             let ttt = tasks[scheduler.OgnName(task)] || {}
             if (eventData.relayTime) {
@@ -283,7 +258,7 @@ let scheduler = {
         }
         if (err instanceof TryNextItem) {
             let eventData = JSON.parse(err.message)
-            logger.error(eventData.message || '执行结束')
+            logger.warn(eventData.message || '执行结束')
             return {
                 ...buildNextTime(eventData, task, {
                     failNum: 0
@@ -321,25 +296,26 @@ let scheduler = {
         }
     },
     buildEnvTask: async (command, task, init_funcs_result) => {
-
         let logger = task.logger
         let st = new Date().getTime();
         let newTask = {}
         try {
             logger.info('开始执行', task.taskName)
 
-            let isrun = scheduler.updateTaskFile(task, {
-                // 限制执行时长2hours，runStopTime用于防止因意外原因导致isRunning=true的任务被中断，而未改变状态使得无法再次执行的问题
-                runStopTime: moment().add(2, 'hours').format('YYYY-MM-DD HH:mm:ss'),
-                isRunning: true
-            }, true)
+            let running = TaskStore.checkTaskRunnig(task)
 
-            if (isrun) {
+            if (running) {
                 throw new TryNextItem(JSON.stringify({
                     message: `已经在运行了,跳过本次运行`,
                     relayTime: 600
                 }))
             }
+
+            TaskStore.updateTask(task, {
+                // 限制执行时长2hours，runStopTime用于防止因意外原因导致isRunning=true的任务被中断，而未改变状态使得无法再次执行的问题
+                runStopTime: moment().add(2, 'hours').format('YYYY-MM-DD HH:mm:ss'),
+                isRunning: true
+            })
 
             let init_result = init_funcs_result[scheduler.OgnName(task) + '_init']
             if (task.waitTime) {
@@ -393,12 +369,12 @@ let scheduler = {
                 throw new StopTask('任务执行内容空')
             }
         } catch (err) {
-            newTask = scheduler.completeTask(err, task, logger)
+            newTask = scheduler.buildTaskResult(err, task, logger)
         }
         finally {
             let time = new Date().getTime() - st;
             logger.info('执行用时', Math.floor(time / 1000), '秒')
-            scheduler.updateTaskFile(task, {
+            TaskStore.updateTask(task, {
                 ...newTask,
                 isRunning: false,
                 time
@@ -406,14 +382,9 @@ let scheduler = {
         }
     },
     buildExecQueue: async (command, will_tasks, concurrency, init_funcs_result) => {
-        // 任务执行
         let queue = new PQueue({ concurrency });
-        if (will_tasks.length) {
-            console.info('调度任务中', '并发数', concurrency)
-        }
-        for (let task of will_tasks) {
-            queue.add(async () => await scheduler.buildEnvTask(command, task, init_funcs_result))
-        }
+        will_tasks.length && console.info('调度任务中', '并发数', concurrency)
+        will_tasks.map(task => queue.add(async () => await scheduler.buildEnvTask(command, task, init_funcs_result)))
         await queue.onIdle()
     },
     execInitFunc: async (command, will_tasks) => {
@@ -423,12 +394,12 @@ let scheduler = {
         for (let task of will_tasks) {
             let ttt = tasks[scheduler.OgnName(task)] || {}
             let tttOptions = ttt.options || {}
-            let savedCookies = await getCookies([command, scheduler.taskKey].join('_')) || tttOptions.cookies
+            let savedCookies = await getCookies([command, scheduler.userKey].join('_')) || tttOptions.cookies
             let logger = {
                 ...console, ...logbuild([
                     command,
                     task.taskName,
-                    scheduler.taskKey.replace('_tryrun', '').replaceWithMask(2, 3)
+                    scheduler.userKey.replace('_tryrun', '').replaceWithMask(2, 3)
                 ])
             }
             let request = {
@@ -481,29 +452,43 @@ let scheduler = {
         scheduler.isTryRun = options?.tryrun || false
         scheduler.cleanCookie = options?.cc || false
         scheduler.concurrency = options?.concurrency || 1
-        scheduler.taskKey = (account.taskKey || account.user || 'default') + (scheduler.isTryRun ? '_tryrun' : '')
+        scheduler.userKey = (account.userKey || account.user || 'default') + (scheduler.isTryRun ? '_tryrun' : '')
         scheduler.account = account
-        process.env['taskKey'] = [command, scheduler.taskKey].join('_')
+        scheduler.taskKey = [command, scheduler.userKey].join('_')
+        scheduler.taskFile = path.join(process.env.asm_save_data_dir, `taskFile_${scheduler.taskKey}.json`)
         scheduler.isRunning = true
+        scheduler.today = moment().format('YYYYMMDD')
+
+        process.env.taskKey = scheduler.taskKey
+        process.env.taskfile = scheduler.taskFile
+
+        // 暂不支持持久化配置，使用一次性执行机制，函数超时时间受functions.timeout影响
+        process.env.asm_func === 'true' ? scheduler.isTryRun = true : ''
 
         if (scheduler.isTryRun) {
             console.info('!!!当前运行在TryRun模式，仅建议在测试时运行!!!')
             await new Promise((resolve) => setTimeout(resolve, 3000))
         }
-        console.info('将使用', scheduler.taskKey.replaceWithMask(2, scheduler.isTryRun ? 10 : 3), '作为账户识别码')
+        console.info('将使用', scheduler.userKey.replaceWithMask(2, scheduler.isTryRun ? 10 : 3), '作为账户识别码')
 
-        await scheduler.genFileName(command)
-        await scheduler.initTasksQueue()
-        let { will_tasks } = await scheduler.loadTasksQueue(account.tasks)
+
+        console.info(
+            '获得配置文件',
+            path.join(
+                process.env.asm_save_data_dir,
+                `taskFile_${command}_${scheduler.userKey.replaceWithMask(2, scheduler.isTryRun ? 10 : 3)}.json`
+            ),
+            '当前日期',
+            scheduler.today)
+
+        await scheduler.initTasksQueue(scheduler.today)
+
+
+        let { will_tasks } = await scheduler.loadTasksQueue(account.tasks, command)
 
         if (!will_tasks.length) {
             console.info('暂无可执行任务！')
             return
-        }
-
-        let { selectedTasks } = scheduler
-        if (selectedTasks.length) {
-            console.info('将只执行选择的任务', selectedTasks.join(','))
         }
 
         // 初始化处理
@@ -518,7 +503,7 @@ let scheduler = {
         await console.sendLog()
 
         if (scheduler.cleanCookie) {
-            await delCookiesFile([command, scheduler.taskKey].join('_'))
+            await delCookiesFile([command, scheduler.userKey].join('_'))
         }
     }
 }

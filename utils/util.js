@@ -151,7 +151,7 @@ module.exports = {
         }).catch(err => console.error(err))
         await scheduler.execTask(command, {
             ...params.options.account,
-            taskKey: params.taskKey
+            userKey: params.userKey
         }, options).catch(err => console.error(err)).finally(() => {
             if (callback) {
                 callback(scheduler)

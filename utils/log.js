@@ -172,12 +172,16 @@ var wrapper_color = (type, msg) => {
             msg = `\x1B[31m${msg}\x1B[0m`
         } else if (type === 'reward') {
             msg = `\x1B[36m${msg}\x1B[0m`
+        } else if (type === 'warn') {
+            msg = `\x1B[35m${msg}\x1B[39m`
         }
     }
     if (type === 'error') {
-        msg = '[❌🤣🌋] ' + msg
+        msg = '[❌] ' + msg
     } else if (type === 'reward') {
-        msg = '[✅🤩🍗] ' + msg
+        msg = '[✅] ' + msg
+    } else if (type === 'warn') {
+        msg = '[🤣] ' + msg
     }
     return msg
 }
@@ -208,7 +212,11 @@ module.exports = {
         }
 
         log.info = function () {
-            stdout_task_msg(log_key, util.format.apply(null, arguments))
+            stdout_task_msg(log_key, wrapper_color('info', util.format.apply(null, arguments)))
+        }
+
+        log.warn = function () {
+            stdout_task_msg(log_key, wrapper_color('warn', util.format.apply(null, arguments)))
         }
 
         log.error = function () {
